@@ -1,0 +1,519 @@
+
+# ### Stoichiometric Coefficient
+# SEI=product+ C2H4 + CO2 + 0.5 O2
+# cathode= product+ 0.5 O2
+# electrolyte= 3CO2 + 2 H2O
+
+# #Reactant Mass Ratio
+# MRSEI=mSEI/mActive= 10
+# MRcat=mcat/mActive= 47.5
+# MRan=man/mActive=30
+# MRele=mele/mActive=10
+
+# #Reactant Molecular Weight
+# MWSEI=(CH2OCO2Li)2= (14+16+44+7)*2=162
+# MWcat=Lix Ni1/3 Co1/3 Mn1/3 O2= 7+ 58.7/3 + 27/3 + 55/3 + 32= 86
+# MWan= C (graphite)=12
+# MWele=C3H4O3=88
+# MWC2H4=28
+# MWCO2=44
+# MWO2=32
+# MWH2O=18
+
+
+# #Moles released for each gas species
+# dndtC2H4= 0.1*800*self.rxn_sei_d.rate/MWSEI
+# dndtCO2=0.1*800*self.rxn_sei_d.rate/MWSEI + 3*0.1*800*self.rxn_sei_d.rate/MWele
+# dndtO2=0.5*0.1*800*self.rxn_sei_d.rate/MWSEI + 0.5*0.475*800*self.rxn_sei_d.rate/MWcat
+# dndtH2O=2*0.1*800*self.rxn_sei_d.rate/MWele
+
+
+
+
+
+
+
+
+
+import numpy as np
+from scipy.integrate import odeint
+import matplotlib.pyplot as plt
+class species:
+    def __init__(self, name, info=None, concentration=0):
+        self.name = name
+        self.info = info
+        self.c = concentration
+
+class reaction:
+#     def __init__(self, name, info=None, A=0, E=0, delta_H=0, Yx=1, rate=0, stoechiometry=[0, 0, 0, 0]):
+    # BX: dndt and dPdt should also be included in the input
+    def __init__(self, name, info=None, A=0, E=0, delta_H=0, Yx=1, rate=0, stoechiometry=[0, 0, 0, 0], dndt=0, dPdt=0):
+        self.name = name
+        self.info = info
+        self.A = A # 1/s
+        self.E = E # kJ/mol
+        self.delta_H = delta_H # J/g
+        self.Yx = Yx
+        self.rate = rate # 1/s
+        self.dqdt = self.Yx * self.delta_H * self.rate # J/g/s
+        self.stoechiometry = stoechiometry
+        self.dndt = dndt
+        self.dPdt = dPdt
+        
+    def calc_dqdt(self):
+        self.dqdt = self.Yx * self.delta_H * self.rate
+
+class battery:
+    
+    def __init__(self, 
+                 T_bat=273.15+30, 
+                 T_oven=273.15+152.2,
+                 tsei_ref=0.033, 
+                 m_bat=1100,
+                 m_active=800,
+                 cp=1.27,
+                 A=0.0841,
+                 h_conv=7.5, 
+                 volume=1E-6, 
+                 AV_ratio=300, 
+                 epsilon=0.8, 
+                 sigma=5.6703744E-08,
+                 rho_cp=2.789E+6,
+                 c0=None,
+                 # BX: initial condition should also be included as input
+                 Vgas=3E-7, #m³
+                 P0=101325+26000,  #Pa
+                 T0=298.15   #K
+                ):
+        self.T_bat = T_bat # K
+        self.T_oven = T_oven # K
+        self.tsei_ref = tsei_ref
+        self.m_bat = m_bat # g
+        self.m_active = m_active # g
+        self.cp = cp # J/g/K
+        self.A = A # m2
+        self.h_conv = h_conv # W/m2/K
+        self.volume = volume # m3
+        self.AV_ratio = AV_ratio # 1/m
+        self.epsilon = epsilon
+        self.sigma = sigma
+        self.rho_cp = rho_cp # J/m3/K
+        self.c0 = c0
+        
+        ### Initial Condition
+        # BX: we need to write "self.xxx" to make the variable an attribute of the class
+        self.Vgas = Vgas
+        self.P0 = P0
+        self.T0 = T0
+#         Vgas=3E-7 #m³
+#         P0=101325+26000  #Pa
+#         T0=298.15   #K
+        # BX: self.const['R'] was not defined before, so you need to define it here.
+        # BX: The unit you use are: P0 (Pa), Vgas (m3), T0 (K). Therefore, it is better to use ideal gas constant in the same units, R = 8.3145 m3*Pa/K/mol
+        self.const = {
+            'R': 8.3145 # m3*Pa/K/mol
+        }
+        self.N0 = self.P0*self.Vgas/(self.const['R']*self.T0) # mol
+#         N0=P0*Vgas/(self.const['R']*T0)
+        
+# Kim-Hatchard 2007 Model - ODEs
+    
+class ModelODE:
+    
+    def __init__(self, battery):
+        
+        ##### Constants
+        self.const = {
+            'R': 8.3145E-3, # kJ/K/mol
+            'R (m3*Pa/K/mol)': 8.3145 # m3*Pa/K/mol
+#             'R': 8.3145 # J/K/mol
+        }
+        
+        ##### battery parameters
+        self.bat = battery
+        
+        ##### Kinetic parameters
+        
+        ### Species
+        self.sei = species(name='sei', info='SEI')
+        self.tsei = species(name='tsei', info='SEI thickness')
+        self.an = species(name='an', info='Anode')
+        self.cat = species(name='cat', info='Cathode')
+        self.ele = species(name='ele', info='Electrolyte')
+        
+        self.bin = species(name='bin', info='Binder')
+        self.cat1 = species(name='cat1', info='Cathode1')
+        self.cat2 = species(name='cat2', info='Cathode2')
+        self.cat3 = species(name='cat3', info='Cathode3')
+        
+        
+        self.C2H4 = species(name='C2H4', info='C2H4')
+        self.CO2 = species(name='CO2', info='CO2')
+        self.H2O = species(name='H2O', info='H2O')
+        self.O2 = species(name='O2', info='O2')
+        self.N2 = species(name='N2', info='N2')
+        
+        # BX: typo: self.H2O instead of self.H20
+        self.spec = [self.sei, self.tsei, self.an, self.cat, self.ele, self.bin, self.cat1, self.cat2, self.cat3, self.C2H4, self.CO2, self.H2O, self.O2, self.N2]
+        
+        ### Reactions
+        self.rxn_sei_d = reaction(
+            name='sei_decomp',
+            info='SEI decomposition',
+            A=1.67E+15,
+            E=134.896,
+            delta_H=1312,
+            Yx=0.46,
+#             stoechiometry=[1, 1, 0.5, 0],
+            stoechiometry=[1, 1, 0.5, 0] # BX: the last element does not need to be followed by a comma
+        )
+        self.rxn_an_ele = reaction(
+            name='an+ele',
+            info='Andoe electrolyte reaction',
+            A=1.78E+14,
+            E=161.996,
+            delta_H=479.397,
+            Yx=0.46,
+#             stoechiometry=[0, 0, 0, 0],
+            stoechiometry=[0, 0, 0, 0] # BX: the last element does not need to be followed by a comma
+        )
+        self.rxn_an_bin_d = reaction(
+            name='an+bindec',
+            info='Andoe binder decomposition reaction',
+            A=5.62E+6,
+            E=96.355,
+            delta_H=208.15,
+            Yx=0.46,
+            stoechiometry=[0, 0, 0, 0]
+        )
+        self.rxn_cat1_dec = reaction(
+            name='cat1_decomp',
+            info='Cathode1 decompostion',
+            A=3.22E+10,
+            E=141.521,
+            delta_H=100.02,
+            Yx=1,
+            stoechiometry=[0, 0, 0.5, 0]
+        )
+        
+        self.rxn_cat_bin_dec = reaction(
+            name='cat_bin_decomp',
+            info='Cathode Binder decompostion',
+            A=3.78E+12,
+            E=205.356,
+            delta_H=212.9,
+            Yx=1,
+            stoechiometry=[0, 0, 0.5, 0]
+        )
+        
+        self.rxn_cat3_dec = reaction(
+            name='cat3_decomp',
+            info='Cathode3 decompostion',
+            A=1.3E+6,
+            E=289.064,
+            delta_H=189.02,
+            Yx=1,
+            stoechiometry=[0, 0, 0.5, 0]
+        )
+        self.rxn_ele_evap = reaction(
+            name='ele_evap',
+            info='Electrode evaporation',
+            A=2.23E+7,
+            E=95.15,
+            delta_H=-62.5,
+            Yx=1,
+            stoechiometry=[0, 3, 0, 2]
+        )
+        self.rxn_ele_dec = reaction(
+            name='ele_decomp',
+            info='Electrode decompostion',
+            A=5.14E+25,
+            E=2276.379,
+            delta_H=155,
+            Yx=1,
+            stoechiometry=[0, 3, 0, 2]
+        )
+        #self.rxn_ele_oxi = reaction(
+            #name='ele_oxi',
+            #info='Electrode oxidation',
+            #A=5.14E+18,
+            #E=1264.66,
+            #delta_H=155,
+            #Yx=1
+        #)
+        
+        self.rxn = [self.rxn_sei_d, self.rxn_an_ele, self.rxn_an_bin_d, self.rxn_cat1_dec, self.rxn_cat_bin_dec, self.rxn_cat3_dec, self.rxn_ele_evap, self.rxn_ele_dec]
+
+    def __call__(self, y, t):
+        """the ODE function, dydt = f(y,t) """
+        
+        # BX: the assignment of variables should be consistant with the results
+
+#         # Constraint: all value >=0
+#         y = [ x if x>=0 else 0 for x in y ]
+        
+        # BX: condensed species
+        # Constraint: all concentration <=1
+        y_c = [ x if x<=1 else 1 for x in y[3:11] ] 
+        
+        # Input: Temperature
+        T = y[0]   
+        # Input: Heat Release
+        Q = y[1] 
+        Q_anode = y[2] 
+        # BX: Input: Concentrations for condensed species
+        for i in range(len(self.spec[:8])):
+            self.spec[i].c = y_c[i]
+        # BX: Input: total mole of gas 
+        n = y[17]
+        # BX: Input: pressure
+        P = y[18]
+        
+        # Reaction Rates
+        self.rxn_sei_d.rate = self.rxn_sei_d.A * self.an.c * np.exp(-self.rxn_sei_d.E/self.const['R']/T) * np.exp(-self.tsei.c/self.bat.tsei_ref)
+        self.rxn_an_ele.rate = self.rxn_an_ele.A * self.an.c * np.exp(-self.rxn_an_ele.E/self.const['R']/T) 
+        self.rxn_an_bin_d.rate = self.rxn_an_bin_d.A * self.bin.c * np.exp(-self.rxn_an_bin_d.E/self.const['R']/T)
+        self.rxn_cat1_dec.rate = self.rxn_cat1_dec.A * self.cat1.c * np.exp(-self.rxn_cat1_dec.E/self.const['R']/T)
+        self.rxn_cat_bin_dec.rate = self.rxn_cat_bin_dec.A * self.cat2.c * np.exp(-self.rxn_cat_bin_dec.E/self.const['R']/T)
+        self.rxn_cat3_dec.rate = self.rxn_cat3_dec.A * self.cat3.c * np.exp(-self.rxn_cat3_dec.E/self.const['R']/T)
+        self.rxn_ele_evap.rate = self.rxn_ele_evap.A * self.ele.c * np.exp(-self.rxn_ele_evap.E/self.const['R']/T)
+        self.rxn_ele_dec.rate = self.rxn_ele_dec.A * self.ele.c * np.exp(-self.rxn_ele_dec.E/self.const['R']/T)
+        
+        
+        # dcdt
+        self.an.dcdt= -self.rxn_an_ele.rate - self.rxn_sei_d.rate
+        self.cat.dcdt = (- self.rxn_cat1_dec.rate - self.rxn_cat3_dec.rate - self.rxn_cat_bin_dec.rate)/3
+        self.ele.dcdt = - self.rxn_ele_dec.rate - self.rxn_ele_evap.rate
+        self.sei.dcdt = - self.rxn_sei_d.rate
+        self.tsei.dcdt = self.rxn_sei_d.rate
+        self.bin.dcdt = - self.rxn_an_bin_d.rate
+        self.cat1.dcdt = - self.rxn_cat1_dec.rate
+        self.cat2.dcdt = - self.rxn_cat_bin_dec.rate
+        self.cat3.dcdt = - self.rxn_cat3_dec.rate
+        
+        
+        
+        # Energy Equation
+        # dQdt (J/g/s)
+        self.rxn_sei_d.calc_dqdt()
+        self.rxn_an_ele.calc_dqdt()
+        self.rxn_an_bin_d.calc_dqdt()
+        self.rxn_cat1_dec.calc_dqdt()
+        self.rxn_cat_bin_dec.calc_dqdt()
+        self.rxn_cat3_dec.calc_dqdt()
+        self.rxn_ele_evap.calc_dqdt()
+        self.rxn_ele_dec.calc_dqdt()
+        
+        
+        dQdt = np.sum([self.rxn_sei_d.dqdt, self.rxn_an_ele.dqdt, self.rxn_an_bin_d.dqdt, self.rxn_cat1_dec.dqdt/3, self.rxn_cat_bin_dec.dqdt/3, self.rxn_cat3_dec.dqdt/3, self.rxn_ele_evap.dqdt, self.rxn_ele_dec.dqdt])
+        
+        dQdt_anode = np.sum([self.rxn_sei_d.dqdt, self.rxn_an_ele.dqdt])
+        dQdt_cathode = np.sum([self.rxn_cat1_dec.dqdt/3, self.rxn_cat_bin_dec.dqdt/3, self.rxn_cat3_dec.dqdt/3])
+        # dTdt 1/g/s/g/K
+        self.bat.T_bat = T
+#         # Oven Mode
+#         dTdt = ( self.bat.m_active*dQdt + self.bat.h_conv*self.bat.A*(self.bat.T_oven-self.bat.T_bat) ) / ( self.bat.m_bat*self.bat.cp )
+#         # DSC mode
+#         dTdt =5/60
+        # Custom mode: heat up to T_oven, then turn off heating and wait
+        if self.bat.T_bat < self.bat.T_oven :
+            dTdt = ( self.bat.m_active*dQdt + self.bat.h_conv*self.bat.A*(self.bat.T_oven-self.bat.T_bat) ) / ( self.bat.m_bat*self.bat.cp )
+        else :
+            dTdt = ( self.bat.m_active*dQdt ) / ( self.bat.m_bat*self.bat.cp )
+        
+        
+        #Moles released for each gas species
+        # BX: all the MWs are not defined
+        MWSEI=162
+        MWcat= 86
+        MWan=12
+        MWele=88
+        
+        self.C2H4.dndt= 0.1*800*self.rxn_sei_d.rate/MWSEI
+        self.CO2.dndt=0.1*800*self.rxn_sei_d.rate/MWSEI + 3*0.1*800*self.rxn_an_ele.rate/MWele
+        self.O2.dndt=0.5*0.1*800*self.rxn_sei_d.rate/MWSEI + 0.5*0.475*800*((self.rxn_cat1_dec.rate + self.rxn_cat3_dec.rate +self.rxn_cat_bin_dec.rate )/3)/MWcat
+        self.H2O.dndt=2*0.1*800*self.rxn_an_ele.rate/MWele
+        self.N2.dndt=0
+        
+        dndt= np.sum([self.C2H4.dndt, self.CO2.dndt, self.O2.dndt, self.H2O.dndt])
+        
+        #Pressure
+        # BX: be careful with the units
+        # BX: Vgas, N0, T0 information were stored in the self.bat attribute
+        dPdt=(self.const['R (m3*Pa/K/mol)']/self.bat.Vgas)*(n*dTdt + T*dndt)
+#         self.DPdt=(self.const['R']/Vgas)*(N0*DTdt + T0*dndt)
+        
+        
+        # Final Results
+#         dydt = [dTdt, self.sei.dcdt, self.tsei.dcdt, self.an.dcdt]
+        # BX: you need to include all the variables you computed in the returned results
+        # BX: In addition, the results for gas species are dndt, not dcdt (which is for condensed phase species). We need to separate them.
+        dydt = [dTdt, dQdt, dQdt_anode] + [ s.dcdt for s in self.spec[:9] ] + [ s.dndt for s in self.spec[9:] ] + [dndt, dPdt]
+        dydt = [dTdt] + [dQdt, dQdt_anode] + [ s.dcdt for s in self.spec ] + [dndt]
+        
+        return dydt
+
+# Initial Value
+
+bat = battery(
+    T_bat=273.15+25,
+    T_oven=273.15+152.2,
+    tsei_ref=0.033, 
+    m_bat=1100,
+    m_active=800,
+    cp=1.27,
+    A=0.0841,
+    h_conv=7.5,
+    c0=[
+        1,  # sei
+        0.033,  # tsei
+        1,  # an
+        1,  # cat
+        1,  # ele
+        1,
+        1,
+        1,
+        1,
+        0, #C2H4
+        0, #CO2
+        0, #O2
+        0 #H2O
+        # BX: For gas species, it is moles instead of concentration. Therefore n_N2 is not 1, it is equal to self.N0
+        # BX: Therefore, we can remove N2 here and define initial value separately later
+#         1, #N2
+    ],
+    # BX: initial condition should also be included as input
+    Vgas=3E-7, #m³
+    P0=101325+26000,  #Pa
+    T0=298.15   #K
+)
+
+# BX: Here the initial values need to be consistant with the results
+y0 = [bat.T0] + [0,0] + bat.c0 + [bat.N0, bat.N0, bat.P0]
+# y0 = [bat.T_bat] + [0,0] + bat.c0 + self.N2.dndt
+
+# Setup model
+KimHatchard = ModelODE(bat)
+# time points
+t = np.linspace(0,60*125)
+# solve ODE
+
+y = odeint(KimHatchard, y0, t)
+# Results
+T = y[:,0]
+Q = y[:,1]
+Q_anode = y[:,2]
+c_sei = y[:,3]
+c_tsei = y[:,4]
+c_an = y[:,5]
+c_cat = y[:,6]
+c_ele = y[:,7]
+c_bin = y[:,8]
+c_cat1 = y[:,9]
+c_cat2 = y[:,10]
+c_cat3 = y[:,11]
+# BX: there are more results
+# dndt = y[:,12]
+n_C2H4 = y[:,12]
+n_CO2  = y[:,13]
+n_H2O  = y[:,14]
+n_O2   = y[:,15]
+n_N2   = y[:,16]
+n      = y[:,17]
+P      = y[:,18]
+
+# Plot
+fig, ax = plt.subplots()
+ax.plot(t/60, T-273.15, label='T')
+ax.set_xlabel('Time (min)')
+ax.set_ylabel('T (dgC)')
+ax.legend()
+plt.savefig("fig/T-t-cus.svg")
+plt.show()
+
+
+
+# Plot
+fig, ax = plt.subplots()
+ax.plot(t/60, c_sei, label='sei')
+ax.plot(t/60, c_an, label='an')
+ax.plot(t/60, c_cat, label='cat')
+ax.plot(t/60, c_ele, label='ele')
+ax.plot(t/60, c_bin, label='bin')
+ax.set_xlabel('Time (min)')
+ax.set_ylabel('Concentration')
+ax.legend()
+plt.savefig("fig/C-t-cus.svg")
+plt.show()
+
+
+fig, ax = plt.subplots()
+ax.plot(T-273.15, c_sei, label='sei')
+ax.plot(T-273.15, c_an, label='an')
+ax.plot(T-273.15, c_cat, label='cat')
+ax.plot(T-273.15, c_ele, label='ele')
+ax.plot(T-273.15, c_bin, label='bin')
+ax.set_xlabel('T (dgC)')
+ax.set_ylabel('Concentration')
+ax.legend()
+plt.savefig("fig/C-temp-cus.svg")
+plt.show()
+
+
+# Plot
+fig, ax = plt.subplots()
+ax.plot(T-273.15, Q, label='Q')
+ax.plot(T-273.15, Q_anode, label='Q_anode')
+ax.set_xlabel('Temperature (dgC)')
+ax.set_ylabel('Heat Release (unit)')
+ax.legend()
+plt.savefig("fig/Q-temp-cus.svg")
+plt.show()
+
+
+fig, ax = plt.subplots()
+ax.plot(t/60, Q, label='Q')
+ax.plot(t/60, Q_anode, label='Q_anode')
+ax.set_xlabel('Time (min)')
+ax.set_ylabel('Heat Release (unit)')
+ax.legend()
+plt.savefig("fig/Q-t-cus.svg")
+plt.show()
+
+# Plot
+fig, ax = plt.subplots()
+ax.plot(t/60, c_tsei, label='tsei')
+ax.set_xlabel('Time (min)')
+ax.set_ylabel('Concentration')
+ax.legend()
+plt.show()
+
+# Plot
+# BX: it should be n instead of dndt
+fig, ax = plt.subplots()
+ax.plot(t/60, n, label='Total')
+ax.plot(t/60, n_C2H4, label='C2H4')
+ax.plot(t/60, n_CO2, label='CO2')
+ax.plot(t/60, n_H2O, label='H2O')
+ax.plot(t/60, n_O2, label='O2')
+ax.plot(t/60, n_N2, label='N2')
+ax.set_xlabel('Time (min)')
+ax.set_ylabel('Amount of Gas Released (mol)')
+ax.legend()
+plt.savefig("fig/GasRelaese-t-cus.svg")
+plt.show()
+
+
+
+fig, ax = plt.subplots()
+ax.plot(T-273.15, n, label='Total')
+ax.plot(T-273.15, n_C2H4, label='C2H4')
+ax.plot(T-273.15, n_CO2, label='CO2')
+ax.plot(T-273.15, n_H2O, label='H2O')
+ax.plot(T-273.15, n_O2, label='O2')
+ax.plot(T-273.15, n_N2, label='N2')
+ax.set_xlabel('T (dgC)')
+ax.set_ylabel('Amount of Gas Released (mol)')
+ax.legend()
+plt.savefig("fig/GasRelaese-temp-cus.svg")
+plt.show()
